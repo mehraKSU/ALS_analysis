@@ -9,22 +9,103 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
+```{r}
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+# load packages
+if(!require(pacman)){
+  install.packages('pacman', repos = 'https://cloud.r-project.org')
+}
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+library(pacman)
+p_load(tidyverse, readxl)
 
-```{r cars}
-summary(cars)
+# tidy the data
+photo_log <- read_xlsx('Photo Log.xlsx') %>% # import photo log file
+  
+            select(Photo_number, Plant, Leaf) %>% # select three required columns
+  
+            fill(Plant) %>% # fill empty cells in Plant
+  
+            filter(Photo_number != "---") %>% # remove empty rows
+  
+            separate(Plant, c("Plot", "Plant_num", "Distance"), 
+                     sep = "-", remove = FALSE, convert = TRUE) %>% # make three new variables out of Plant
+            
+            separate(Plot, c("Rep", "Trt"), sep = "0", remove = FALSE, convert = TRUE) %>%
+  
+            mutate(Plant_type = if_else(is.na(Distance) & !is.na(Plant_num), "Source", "Trap"), 
+                   Photo_number = parse_number(Photo_number),
+                   Run = if_else(Photo_number < 3322, 1, 2)) %>% # create new variable Plant _type that indicates whether it is a source or trap plant; parse Photo_number as numbers instead of characters; create a new variable called Run
+            select(Run, Plant_type, Plot, Rep, Trt, Distance, Plant_num, Leaf, Photo_number)
+
+# import run 2 source plants data
+run2_source <- read_xlsx("all_images_source_run2.xlsx") %>%
+  
+                select(Image, adj_percent_severity) %>%
+  
+                transmute(Photo_number = parse_number(Image), severity = adj_percent_severity)
+
+# import run 1 trap plants data
+run1_trap <- read_xlsx("all_images_trap_run1.xlsx") %>%
+  
+  select(Image, percent_severity) %>%
+  
+  transmute(Photo_number = parse_number(Image), severity = percent_severity)
+
+# import run 2 trap plants data
+run2_trap <- read_xlsx("all_images_trap_run2.xlsx") %>%
+  
+  select(Image, adjusted_percent_severity) %>%
+  
+  transmute(Photo_number = parse_number(Image), severity = adjusted_percent_severity)
+
+# bind rows of run1_trap, run2_source, run2_trap
+disease <- bind_rows(run1_trap, run2_source, run2_trap)
+
+# join photo log with disease data
+als <- photo_log %>%
+  
+  left_join(disease, by = "Photo_number")
+
+# import run 1 source plants data
+run1_source <- read_xlsx("Disease Assessment on Leaves.xlsx") %>%
+  
+  select(Plant_num, Wind_speed_mph, Rep, Leaf_num, Leaf_area_px, Lesion_area_px) %>%
+  
+  separate(Plant_num, c("Plot", "Plant_num"), sep = "-", remove = TRUE, convert = TRUE) %>%
+  
+  mutate(Leaf = round(Leaf_num)) %>%
+  
+  group_by(Rep, Wind_speed_mph, Plant_num, Leaf, Plot) %>%
+  
+  summarise(severity = (sum(Lesion_area_px) / sum(Leaf_area_px)) * 100) %>%
+  
+  mutate(Run = 1, Plant_type = "Source", Distance = NA)
+
+# bind this data to als dataset
+als <- als %>%
+  
+  mutate(Leaf = parse_number(Leaf)) # parse Leaf as numeric variable so that als data can be appended (or bound) to run1_source
+
+# bind the two datasets
+als1 <- bind_rows(als, run1_source)
+
+# populate the Wind_speed_mph variable
+als2 <- als1 %>%
+  
+  mutate(Wind_speed_mph = if_else(is.na(Wind_speed_mph) & Trt == 1, 5,
+                                  if_else(is.na(Wind_speed_mph) & Trt == 2, 10,
+                                          if_else(is.na(Wind_speed_mph) & Trt == 3, 25,
+                                                  if_else(is.na(Wind_speed_mph) & Trt == 4, 35,
+                                                          if_else(is.na(Wind_speed_mph) & Trt == 5, 45, Wind_speed_mph)))))) %>%
+  
+  select(-Trt, Run, Plant_type, Plot, Rep, Wind_speed_mph, Distance, Plant_num, Leaf, Photo_number, severity)
+           
 ```
 
-## Including Plots
 
-You can also embed plots, for example:
+#### Some notes
 
-```{r pressure, echo=FALSE}
-plot(pressure)
-```
+Images that had more than 10% disease severity were manually checked to make sure that classification algorithm (Random Trees in arcmap and python) worked as expected.
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+- `tidyverse` can be updated by using `tidyverse_update()` command
