@@ -1,0 +1,229 @@
+---
+title: "Angular leaf spot data processing"
+author: "Lucky Mehra"
+date: "July 26, 2018"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+library(formatR)
+knitr::opts_chunk$set(echo = TRUE, tidy.opts=list(width.cutoff=80),tidy=TRUE)
+```
+
+### Load packages
+
+```{r}
+if(!require(pacman)){
+  install.packages('pacman', repos = 'https://cloud.r-project.org')
+}
+
+library(pacman)
+p_load(tidyverse, readxl, openxlsx)
+```
+
+### Tidy the data
+
+#### Import and clean photo ID data
+
+```{r, include=FALSE}
+# import photo log file
+photo_log <- read_xlsx('data/Photo Log.xlsx') %>% 
+  
+  # select three required columns
+  select(Photo_number, Plant, Leaf) %>%
+  
+  # fill empty cells in Plant
+  fill(Plant) %>%
+  
+  # remove empty rows
+  filter(Photo_number != "---" & Leaf != "X") %>%
+  
+  # make three new variables out of Plant
+  separate(Plant, c("Plot", "Plant_num", "Distance"), 
+                     sep = "-", remove = FALSE, convert = TRUE) %>% 
+            
+  separate(Plot, c("Rep", "Trt"), sep = "0", remove = FALSE, convert = TRUE) %>%
+  
+  # create new variable Plant _type that indicates whether it is a source or trap plant; parse Photo_number as numbers instead of characters; create a new variable called Run
+  mutate(Plant_type = if_else(is.na(Distance) & !is.na(Plant_num), "Source", "Trap"), 
+                   Photo_number = parse_number(Photo_number),
+                   Run = if_else(Photo_number < 3322, 1, 2)) %>%
+  
+  select(Run, Plant_type, Plot, Rep, Trt, Distance, Plant_num, Leaf, Photo_number)
+```
+
+#### Import image analysis data outputted from arcmap/python. After importing, combine these files in one tibble.
+
+```{r}
+# import run 2 source plants data
+run2_source <- read_xlsx("data/all_images_source_run2.xlsx") %>%
+  
+                select(Image, adj_percent_severity) %>%
+  
+                transmute(Photo_number = parse_number(Image), severity = adj_percent_severity)
+
+# import run 1 trap plants data
+run1_trap <- read_xlsx("data/all_images_trap_run1.xlsx") %>%
+  
+  select(Image, percent_severity) %>%
+  
+  transmute(Photo_number = parse_number(Image), severity = percent_severity)
+
+# import run 2 trap plants data
+run2_trap <- read_xlsx("data/all_images_trap_run2.xlsx") %>%
+  
+  select(Image, adjusted_percent_severity) %>%
+  
+  transmute(Photo_number = parse_number(Image), severity = adjusted_percent_severity)
+
+# bind rows of run1_trap, run2_source, run2_trap
+disease <- bind_rows(run1_trap, run2_source, run2_trap)
+```
+
+#### Join photo_log with disease data to match each photo with inidividual leaves and corresponding treatment code.
+
+```{r}
+als <- photo_log %>%
+  
+  left_join(disease, by = "Photo_number")
+```
+
+#### Import image analysis data outputted from Assess 2.0. These images were processed by Leigh Sitler at USDA, Fort Pierce, FL.
+
+```{r}
+# import run 1 source plants data
+run1_source <- read_xlsx("data/Disease Assessment on Leaves 1.xlsx", sheet = 1) %>%
+  
+  select(Plant_num, Wind_speed_mph, Rep, Leaf_num, Leaf_area_px, Lesion_area_px) %>%
+  
+  separate(Plant_num, c("Plot", "Plant_num"), sep = "-", remove = TRUE, convert = TRUE) %>%
+  
+  mutate(Leaf = round(Leaf_num)) %>%
+  
+  group_by(Rep, Wind_speed_mph, Plant_num, Leaf, Plot) %>%
+  
+  summarise(severity = (sum(Lesion_area_px) / sum(Leaf_area_px)) * 100) %>%
+  
+  mutate(Run = 1, Plant_type = "Source", Distance = NA)
+
+# import run 1 trap plants data 
+run1_trap_leigh <- read_xlsx("data/Disease Assessment on Leaves 1.xlsx", sheet = 2) %>%
+  
+  select(Plant_num, Wind_speed_mph, Rep, Leaf_num, Leaf_area_px, Lesion_area_px) %>%
+  
+  separate(Plant_num, c("Plot", "Plant_num", "Distance"), sep = "-", remove = TRUE, convert = TRUE) %>%
+  
+  mutate(severity = (Lesion_area_px / Leaf_area_px) * 100,
+         Run = 1,
+         Plant_type = "Trap",
+         Leaf = Leaf_num) %>%
+  
+  select(-Lesion_area_px, -Leaf_area_px, -Leaf_num)
+```
+
+#### Next step is to bind the above data to als tibble.
+
+```{r, include=FALSE}
+# bind this data to als dataset
+als <- als %>%
+  
+  # parse Leaf as numeric variable so that als data can be appended (or bound) to run1_source
+  mutate(Leaf = parse_number(Leaf)) 
+
+# bind
+als1 <- bind_rows(als, run1_source)
+
+# populate the Wind_speed_mph variable
+als2 <- als1 %>%
+  
+  mutate(Wind_speed_mph = if_else(is.na(Wind_speed_mph) & Trt == 1, 5,
+                                  if_else(is.na(Wind_speed_mph) & Trt == 2, 10,
+                                          if_else(is.na(Wind_speed_mph) & Trt == 3, 25,
+                                                  if_else(is.na(Wind_speed_mph) & Trt == 4, 35,
+                                                          if_else(is.na(Wind_speed_mph) & Trt == 5, 45, Wind_speed_mph)))))) %>%
+  
+  select(-Trt, Run, Plant_type, Plot, Rep, Wind_speed_mph, Distance, Plant_num, Leaf, Photo_number, severity)
+
+# join run1_trap_leigh with als2
+als3 <- als2 %>%
+  
+  left_join(run1_trap_leigh, by = c("Run", 
+                                    "Plant_type", 
+                                    "Plot", "Rep", 
+                                    "Wind_speed_mph", 
+                                    "Distance", 
+                                    "Plant_num", 
+                                    "Leaf")) %>%
+  
+  mutate(severity = coalesce(severity.x, severity.y)) %>%
+  
+  mutate(severity = if_else(is.na(severity), 0, severity)) %>%
+  
+  select(-severity.x, -severity.y)
+           
+```
+
+#### Tibble als3 has all the data in tidy format. Now, calculate average disease severity per plant by taking the mean of severity on three leaves.
+
+```{r}
+als4 <- als3 %>%
+  
+  group_by(Run, Plant_type, Plot, Rep, Wind_speed_mph, Distance, Plant_num) %>%
+  
+  summarise(severity = mean(severity)) %>%
+  
+  filter(!is.na(Plot))
+```
+
+#### Add a column that indicates severity of source plant-set, to the dataset
+
+```{r, include=FALSE}
+# calculate the mean source plant severity for each rep and wind speed combination.
+source <- als4 %>%
+  
+  filter(Plant_type == "Source") %>%
+  
+  group_by(Run, Plot, Rep, Wind_speed_mph) %>%
+  
+  summarise(severity = mean(severity))
+
+# extract trap plant data from als4 tibble
+trap <- als4 %>%
+  
+  ungroup() %>%
+  
+  filter(Plant_type == "Trap") %>%
+  
+  mutate(severity = ifelse(Run == 1 & Plot == 504 & Distance == 16, NA, severity)) %>%
+  
+  select(-Plant_type)
+
+# add source plant-set severity to trap tibble
+als5 <- trap %>%
+
+  left_join(source, by = c("Run",
+                          "Plot",
+                          "Rep",
+                          "Wind_speed_mph"
+                          )) %>%
+  
+  mutate(severity = severity.x, source_sev = severity.y) %>%
+  
+  select(-severity.x, -severity.y)
+
+# save the data in data folder
+# write.xlsx(als5, "data/final.xlsx")
+```
+
+```{r}
+als5
+```
+
+#### Some notes
+
+Images that had more than 10% disease severity were manually checked to make sure that classification algorithm (Random Trees in arcmap and python) worked as expected.
+
+- `tidyverse` can be updated by using `tidyverse_update()` command
